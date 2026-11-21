@@ -1,0 +1,68 @@
+# Causal Corridor Quarantine -- corridor, physics, attack, and experiment config.
+# All quantities SI-consistent after unit conversion in corridor_sim.py.
+
+corridor:
+  n_segments: 4                 # 4-intersection signalized arterial
+  segment_length_m: 500.0       # each segment is 500 m
+  cells_per_segment: 10         # Godunov/CTM spatial discretisation (50 m cells)
+  dt_s: 2.0                     # simulation time step (CFL-stable, see below)
+  horizon_s: 600.0              # simulation horizon (10 min)
+
+fundamental_diagram:            # triangular (Daganzo) FD
+  v_free_kmh: 60.0              # free-flow speed
+  rho_jam_vehkm: 140.0          # jam density
+  q_max_vehh: 1800.0            # capacity (per lane)
+  # Derived (computed in code): rho_crit = q_max/v_free = 30 veh/km,
+  # backward wave w = q_max/(rho_jam-rho_crit) ~= 16.36 km/h.
+  # CFL: v_free*dt = 33.3 m <= cell 50 m  -> stable.
+
+signals:
+  cycle_s: 60.0                 # fixed-time control cycle
+  green_split: 0.55             # nominal green fraction for mainline through movement
+  offset_s: [0.0, 12.0, 24.0, 36.0]   # progression offsets per intersection
+
+demand:
+  inflow_vehh: 1500.0           # upstream mainline demand (below capacity)
+  inflow_noise_frac: 0.08       # multiplicative Gaussian demand noise (seeded)
+  warmup_s: 60.0                # fill the corridor before measuring
+
+dcfc_plaza:
+  segment_index: 2              # off-ramp DC fast-charging plaza after segment 3 (0-based)
+  base_divert_frac: 0.10        # fraction of flow diverting to the plaza nominally
+
+sensing:
+  detector_cell_offset: 5       # loop detector located at mid-cell of each segment
+  rsu_speed_noise_kmh: 1.5      # nominal RSU space-mean-speed noise (seeded)
+  detector_noise_vehkm: 1.0     # nominal loop-detector density noise (seeded)
+
+attacks:
+  onset_s: 200.0                # t_attack
+  duration_s: 300.0            # attack active window
+  scenario_A_rsu_spoof:         # BSM speed spoofing (FDI): report free-flow while congested
+    target_segment: 0            # the recurrently queued entry segment (spoof hides real queue)
+    spoof_speed_kmh: 58.0
+  scenario_B_green_starvation:  # signal phase starvation at a target intersection
+    target_intersection: 2
+    green_split_attacked: 0.18
+  scenario_C_plaza_surge:       # EV plaza demand surge + spoofed detour advisory
+    target_segment: 2
+    surge_divert_frac: 0.42
+    spoofed_advisory_gain: 0.40     # detector FDI under-reports seg density by 40%
+  compound_zero_shot:           # held-out combination of A+B+C (never used for fitting)
+    enabled: true
+
+estimators:
+  ekf_process_var: 2.0
+  ekf_meas_var: 4.0
+  neural_hidden: 128
+  neural_epochs: 60
+  neural_lr: 0.003
+  constrained_meas_gain: 0.6    # correction gain toward trusted detectors
+  constrained_cont_weight: 1.0  # continuity (mass-conservation) weight
+
+experiment:
+  n_episodes: 50                # Monte Carlo episodes
+  train_episodes: 12            # nominal episodes used to fit neural + SCM structural eqs
+  base_seed: 20260101
+  spillback_queue_threshold_vehkm: 60.0   # downstream seg-mean density marking attack spillback
+  sensor_quarantine_zthresh: 2.0          # std-devs of nominal cross-sensor discrepancy to flag
