@@ -32,17 +32,19 @@ os.makedirs(FIGDIR, exist_ok=True)
 # --- theme ----------------------------------------------------------------- #
 FIG_BG, AX_BG = "#0f0f1a", "#1a1a2e"
 FG, GRID = "#d6d6e0", "#33334d"
-C_GT, C_EKF, C_OURS, C_NEURAL = "#c9c9d6", "#4cc9f0", "#ffd166", "#ff6b6b"
+C_GT, C_EKF, C_OURS, C_NEURAL, C_GNN = "#c9c9d6", "#4cc9f0", "#ffd166", "#ff6b6b", "#b983ff"
 METHOD_COLOR = {
     "SUMO Ground Truth": C_GT,
     "EKF (LWR Godunov)": C_EKF,
     "Unconstrained Neural": C_NEURAL,
+    "Graph Neural (GNN)": C_GNN,
     "Causal Quarantine + Conservation (ours)": C_OURS,
 }
 SHORT = {
     "SUMO Ground Truth": "Ground Truth",
     "EKF (LWR Godunov)": "EKF",
     "Unconstrained Neural": "Unconstr. Neural",
+    "Graph Neural (GNN)": "GNN",
     "Causal Quarantine + Conservation (ours)": "Ours",
 }
 
@@ -163,8 +165,8 @@ def fig4_conservation(cfg):
     df = pd.read_csv(os.path.join(RESULTS, "benchmark_metrics.csv"))
     sub = df[(df.regime == "compound") & (df.method != "SUMO Ground Truth")].copy()
     sub["m"] = sub.method.map(SHORT)
-    order = ["EKF", "Unconstr. Neural", "Ours"]
-    colors = [C_EKF, C_NEURAL, C_OURS]
+    order = ["EKF", "Unconstr. Neural", "GNN", "Ours"]
+    colors = [C_EKF, C_NEURAL, C_GNN, C_OURS]
     fig, ax = plt.subplots(figsize=(7.6, 5.0))
     data = [sub[sub.m == o].mass_violation_pct.values for o in order]
     if _SNS:
@@ -185,6 +187,43 @@ def fig4_conservation(cfg):
     _save(fig, "fig4_conservation_residuals")
 
 
+def fig5_attack_sweep_roc(cfg):
+    sweep_p = os.path.join(RESULTS, "attack_sweep.csv")
+    roc_p = os.path.join(RESULTS, "roc.csv")
+    if not (os.path.exists(sweep_p) and os.path.exists(roc_p)):
+        print("  (skipping fig5: run experiments/attack_sweep.py first)")
+        return
+    sweep = pd.read_csv(sweep_p)
+    roc = pd.read_csv(roc_p)
+    auc_p = os.path.join(RESULTS, "roc_auc.txt")
+    auc = float(open(auc_p).read().strip()) if os.path.exists(auc_p) else None
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(11, 4.4))
+    for method, g in sweep.groupby("method"):
+        stat = g.groupby("strength").rmse_vehkm.agg(["mean", "std"]).reset_index()
+        c = METHOD_COLOR.get(method, FG)
+        ax1.plot(stat.strength, stat["mean"], "-o", ms=5, color=c, lw=2, label=SHORT.get(method, method))
+        ax1.fill_between(stat.strength, stat["mean"] - stat["std"], stat["mean"] + stat["std"],
+                         color=c, alpha=0.15)
+    _style(ax1)
+    ax1.set_xlabel("normalised attack strength  s")
+    ax1.set_ylabel("reconstruction RMSE  (veh/km)")
+    ax1.set_title("Robustness vs attack strength", color=FG)
+    ax1.legend(frameon=False, fontsize=9, loc="upper left")
+
+    ax2.plot([0, 1], [0, 1], ls=":", color=GRID, lw=1.2)
+    ax2.plot(roc.fpr, roc.tpr, "-", color=C_OURS, lw=2.4,
+             label=(f"causal quarantine (AUC={auc:.3f})" if auc else "causal quarantine"))
+    ax2.scatter(roc.fpr, roc.tpr, s=16, color=C_OURS, zorder=3)
+    _style(ax2)
+    ax2.set_xlabel("false-positive rate  (benign sensors flagged)")
+    ax2.set_ylabel("true-positive rate  (attacks caught)")
+    ax2.set_title("Sensor-attribution ROC\n(pooled over attack strengths)", color=FG)
+    ax2.legend(frameon=False, fontsize=9, loc="lower right")
+    ax2.set_xlim(-0.02, 1.02); ax2.set_ylim(-0.02, 1.02)
+    fig.tight_layout()
+    _save(fig, "fig5_attack_strength_roc")
+
+
 def main():
     cfg = load_config()
     print("Generating publication figures (300 DPI, svg/pdf/jpg) ...")
@@ -192,6 +231,7 @@ def main():
     fig2_quarantine_resilience(cfg)
     fig3_pareto(cfg)
     fig4_conservation(cfg)
+    fig5_attack_sweep_roc(cfg)
     print("Figures written to", FIGDIR)
 
 

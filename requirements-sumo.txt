@@ -1,0 +1,8 @@
+# Optional -- enables the REAL Eclipse SUMO microsimulation backend used by
+# experiments/validate_sumo.py and sumo_env/sumo_backend.py. Everything else in
+# the repository runs without these (the analytic LWR/Godunov CTM is the default
+# ground truth). Install with:  pip install -r requirements-sumo.txt
+eclipse-sumo>=1.19
+libsumo>=1.19
+traci>=1.19
+sumolib>=1.19

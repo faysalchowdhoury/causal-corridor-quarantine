@@ -110,6 +110,11 @@ class CorridorSCM:
         return self
 
     # -- causal sensor attribution (redundancy / leave-one-out consistency) - #
+    def sensor_zscores(self, meas_window: List[dict]) -> np.ndarray:
+        """Per-segment cross-sensor discrepancy, standardised against nominal."""
+        disc = np.mean([self._discrepancy(m) for m in meas_window], axis=0)
+        return (disc - self.disc_mu) / self.disc_sd
+
     def attribute_sensors(self, meas_window: List[dict], z_thresh: float = 4.0) -> List[str]:
         """Flag the measurement node whose reading is causally inconsistent with
         its redundant partner, standardised against the nominal discrepancy.
@@ -118,8 +123,7 @@ class CorridorSCM:
         under-reporting **detector**; a negative anomaly (detector >> RSU-derived)
         implicates a speed-spoofed **RSU** -- both hallmarks of congestion-hiding
         false-data injection."""
-        disc = np.mean([self._discrepancy(m) for m in meas_window], axis=0)
-        z = (disc - self.disc_mu) / self.disc_sd
+        z = self.sensor_zscores(meas_window)
         flagged: List[str] = []
         for s in range(self.n_seg):
             if z[s] > z_thresh:

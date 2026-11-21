@@ -5,6 +5,7 @@ import os
 import sys
 
 import numpy as np
+import pytest
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
@@ -15,6 +16,7 @@ from cyber_attacks.attack_injector import (AttackInjector, SCENARIOS, rsu_node,
                                            det_node, sig_node, PLAZA_NODE)
 from estimators.reconstructors import (CTMProcessModel, ExtendedKalmanReconstructor,
                                        UnconstrainedNeuralReconstructor,
+                                       GraphNeuralReconstructor,
                                        ConservationConstrainedReconstructor)
 from causal_engine.scm_quarantine import CorridorSCM
 import experiments.run_benchmarks as rb
@@ -74,9 +76,21 @@ def test_sumo_network_export(tmp_path):
         assert os.path.exists(os.path.join(out, f))
 
 
+def test_sumo_backend_optional(tmp_path):
+    """Exercise the real SUMO backend when installed; skip otherwise."""
+    from sumo_env.sumo_backend import sumo_ready, build_network, run_sumo_corridor
+    if not sumo_ready():
+        pytest.skip("SUMO not installed (pip install eclipse-sumo libsumo)")
+    net_dir = str(tmp_path / "net")
+    build_network(CFG, net_dir)
+    d, v, _ = run_sumo_corridor(CFG, seed=1, net_dir=net_dir)
+    assert d.shape[1] == CFG["corridor"]["n_segments"]
+    assert np.isfinite(d).all() and d.min() >= 0.0
+
+
 # --------------------------------------------------------------------------- #
 def _fit_scm():
-    X, Y, seg, grn, meas = rb.collect_training(CFG, [101, 102, 103])
+    X, F, Y, seg, grn, meas = rb.collect_training(CFG, [101, 102, 103])
     return CorridorSCM(CFG).fit(seg, grn, meas)
 
 
@@ -121,20 +135,24 @@ def test_counterfactual_min_regret_reduces_spillback():
 def test_reconstructors_feasibility():
     scm = _fit_scm()
     pm = CTMProcessModel(CFG)
-    X, Y, *_ = rb.collect_training(CFG, [201, 202])
+    X, Fe, Y, *_ = rb.collect_training(CFG, [201, 202])
     neural = UnconstrainedNeuralReconstructor(CFG); neural.fit(X, Y)
+    gnn = GraphNeuralReconstructor(CFG); gnn.fit(Fe, Y)
     cons = ConservationConstrainedReconstructor(CFG)
     ekf = ExtendedKalmanReconstructor(CFG)
     d = rb.run_truth(CFG, 77, AttackInjector(CFG, "compound"))
     mask, _ = rb.decide_quarantine(CFG, scm, pm, d)
     onset_k = int(CFG["attacks"]["onset_s"] / CFG["corridor"]["dt_s"])
-    cons.reset(d["rho"][0]); ekf.reset(d["rho"][0]); neural.reset(d["rho"][0])
+    cons.reset(d["rho"][0]); ekf.reset(d["rho"][0])
+    neural.reset(d["rho"][0]); gnn.reset(d["rho"][0])
     cmin = cmax = None
     for k in range(d["T"]):
         qm = mask if k >= onset_k else None
         ec = cons.reconstruct(d["meas"][k], k * 2.0, qm)
         ee = ekf.reconstruct(d["meas"][k], k * 2.0)
         _ = neural.reconstruct(d["meas"][k], k * 2.0)
+        eg = gnn.reconstruct(d["meas"][k], k * 2.0)
+        assert np.isfinite(eg).all()
         cmin = ec.min() if cmin is None else min(cmin, ec.min())
         cmax = ec.max() if cmax is None else max(cmax, ec.max())
         assert -1e-6 <= ee.min() and ee.max() <= RHO_JAM + 1e-6      # EKF projects
@@ -142,17 +160,23 @@ def test_reconstructors_feasibility():
 
 
 def test_end_to_end_benchmark_and_figures(monkeypatch, tmp_path):
+    # redirect all outputs to a temp dir so the committed results/figures are never clobbered
+    res_dir = str(tmp_path / "results"); fig_dir = str(tmp_path / "figures")
+    os.makedirs(res_dir, exist_ok=True); os.makedirs(fig_dir, exist_ok=True)
     cfg = copy.deepcopy(CFG)
     cfg["experiment"]["n_episodes"] = 1
     cfg["experiment"]["train_episodes"] = 2
     cfg["estimators"]["neural_epochs"] = 8
     monkeypatch.setattr(rb, "load_config", lambda *a, **k: cfg)
+    monkeypatch.setattr(rb, "RESULTS", res_dir)
     monkeypatch.setattr(mpf, "load_config", lambda *a, **k: cfg)
+    monkeypatch.setattr(mpf, "RESULTS", res_dir)
+    monkeypatch.setattr(mpf, "FIGDIR", fig_dir)
     rb.main()
     for f in ("benchmark_metrics.csv", "timeseries_sample.csv", "quarantine_comparison.csv"):
-        assert os.path.exists(os.path.join(rb.RESULTS, f))
+        assert os.path.exists(os.path.join(res_dir, f))
     mpf.main()
     for name in ("fig1_spatiotemporal_spillback", "fig2_quarantine_resilience",
                  "fig3_pareto_latency_accuracy", "fig4_conservation_residuals"):
         for ext in ("svg", "pdf", "jpg"):
-            assert os.path.exists(os.path.join(mpf.FIGDIR, f"{name}.{ext}"))
+            assert os.path.exists(os.path.join(fig_dir, f"{name}.{ext}"))

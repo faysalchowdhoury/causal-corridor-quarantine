@@ -174,6 +174,13 @@ def measurement_vector(meas: Dict[str, np.ndarray]) -> np.ndarray:
     return np.concatenate([meas["det_rho"], meas["det_flow"], meas["rsu_speed"]]).astype(float)
 
 
+def node_features(meas: Dict[str, np.ndarray]) -> np.ndarray:
+    """Per-segment node features [n_seg, 3] = (detector density, flow, RSU speed)."""
+    return np.stack([np.asarray(meas["det_rho"], float),
+                     np.asarray(meas["det_flow"], float),
+                     np.asarray(meas["rsu_speed"], float)], axis=1)
+
+
 class UnconstrainedNeuralReconstructor(Reconstructor):
     name = "Unconstrained Neural"
 
@@ -214,6 +221,88 @@ class UnconstrainedNeuralReconstructor(Reconstructor):
         with torch.no_grad():
             out = self.net(torch.tensor(x, dtype=torch.float32)).numpy()
         self.rho = out                                  # deliberately NOT clipped
+        return self.rho.copy()
+
+
+# --------------------------------------------------------------------------- #
+# Graph-neural baseline (message passing over the corridor segment graph)
+# --------------------------------------------------------------------------- #
+if _TORCH:
+    class _CellGCN(nn.Module):
+        """3-layer GCN over the cell chain with a residual head; per-cell scalar
+        output (unconstrained)."""
+        def __init__(self, a_hat: "torch.Tensor", in_dim: int, hid: int):
+            super().__init__()
+            self.register_buffer("A", a_hat)
+            self.l1 = nn.Linear(in_dim, hid)
+            self.l2 = nn.Linear(hid, hid)
+            self.l3 = nn.Linear(hid, hid)
+            self.h = nn.Linear(hid + in_dim, hid)
+            self.lo = nn.Linear(hid, 1)
+
+        def forward(self, x):                               # x: [B, N, in_dim]
+            h = torch.relu(torch.einsum("ij,bjf->bif", self.A, self.l1(x)))
+            h = torch.relu(torch.einsum("ij,bjf->bif", self.A, self.l2(h)))
+            h = torch.relu(torch.einsum("ij,bjf->bif", self.A, self.l3(h)))
+            h = torch.relu(self.h(torch.cat([h, x], dim=-1)))
+            return self.lo(h).squeeze(-1)                   # [B, N]
+
+
+class GraphNeuralReconstructor(Reconstructor):
+    """Cell-level message-passing GNN over the corridor cell chain: a fair,
+    structure-aware strong learned baseline (per-segment sensor evidence is
+    propagated along the cells), trained identically to the MLP. It is still
+    **unconstrained** -- no physical projection -- so on unseen attacks it too
+    leaves the feasible set."""
+    name = "Graph Neural (GNN)"
+
+    def __init__(self, cfg: dict):
+        if not _TORCH:
+            raise RuntimeError("PyTorch is required for the GNN baseline.")
+        self.cfg = cfg
+        self.n_seg = int(cfg["corridor"]["n_segments"])
+        self.cps = int(cfg["corridor"]["cells_per_segment"])
+        self.N = self.n_seg * self.cps
+        A = np.eye(self.N)
+        for i in range(self.N - 1):                         # cell-chain adjacency + self loops
+            A[i, i + 1] = A[i + 1, i] = 1.0
+        d = np.sqrt(A.sum(1))
+        a_hat = A / d[:, None] / d[None, :]
+        self._pos = np.tile((np.arange(self.cps) / self.cps), self.n_seg)   # position-in-segment
+        torch.manual_seed(0)
+        self.net = _CellGCN(torch.tensor(a_hat, dtype=torch.float32), 4,
+                            int(cfg["estimators"]["neural_hidden"]))
+        self._mu = np.zeros(3)
+        self._sd = np.ones(3)
+
+    def _cell_inputs(self, feats: np.ndarray) -> np.ndarray:
+        """Expand per-segment features [.., n_seg, 3] to per-cell [.., N, 4]
+        (segment sensors broadcast to cells + position-in-segment)."""
+        f = (np.asarray(feats, float) - self._mu) / self._sd        # [..., n_seg, 3]
+        cells = np.repeat(f, self.cps, axis=-2)                     # [..., N, 3]
+        pos = np.broadcast_to(self._pos[..., None], cells.shape[:-1] + (1,))
+        return np.concatenate([cells, pos], axis=-1)               # [..., N, 4]
+
+    def fit(self, feats: np.ndarray, Y: np.ndarray) -> None:
+        feats = np.asarray(feats, float)                           # [M, n_seg, 3]
+        self._mu, self._sd = feats.reshape(-1, 3).mean(0), feats.reshape(-1, 3).std(0) + 1e-6
+        xt = torch.tensor(self._cell_inputs(feats), dtype=torch.float32)
+        yt = torch.tensor(np.asarray(Y, float), dtype=torch.float32)
+        opt = torch.optim.Adam(self.net.parameters(),
+                               lr=float(self.cfg["estimators"]["neural_lr"]))
+        loss_fn = nn.MSELoss()
+        self.net.train()
+        for _ in range(int(self.cfg["estimators"]["neural_epochs"])):
+            opt.zero_grad()
+            loss = loss_fn(self.net(xt), yt)
+            loss.backward(); opt.step()
+        self.net.eval()
+
+    def reconstruct(self, meas, t, quarantine=None):
+        x = self._cell_inputs(node_features(meas))
+        with torch.no_grad():
+            out = self.net(torch.tensor(x[None], dtype=torch.float32)).numpy()[0]
+        self.rho = out                                            # deliberately NOT clipped
         return self.rho.copy()
 
 

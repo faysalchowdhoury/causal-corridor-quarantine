@@ -22,8 +22,9 @@ from cyber_attacks.attack_injector import (AttackInjector, SCENARIOS, PLAZA_NODE
                                            det_node, rsu_node, sig_node)
 from estimators.reconstructors import (CTMProcessModel, ExtendedKalmanReconstructor,
                                        UnconstrainedNeuralReconstructor,
+                                       GraphNeuralReconstructor,
                                        ConservationConstrainedReconstructor,
-                                       measurement_vector)
+                                       measurement_vector, node_features)
 from causal_engine.scm_quarantine import CorridorSCM
 
 RESULTS = os.path.join(ROOT, "results")
@@ -59,17 +60,18 @@ def run_truth(cfg: dict, seed: int, injector: AttackInjector) -> dict:
 # Training data (nominal only) for the neural baseline and SCM structural eqs
 # --------------------------------------------------------------------------- #
 def collect_training(cfg: dict, seeds: List[int]):
-    X, Y, seg_list, green_list, meas_list = [], [], [], [], []
+    X, F, Y, seg_list, green_list, meas_list = [], [], [], [], [], []
     inj = AttackInjector(cfg, "normal")
     for sd in seeds:
         d = run_truth(cfg, sd, inj)
         for k in range(d["T"]):
             X.append(measurement_vector(d["meas"][k]))
+            F.append(node_features(d["meas"][k]))
             Y.append(d["rho"][k])
         seg_list.append(d["rho"].reshape(d["T"], d["n_seg"], d["cps"]).mean(axis=2))
         green_list.append(d["green_nom"])
         meas_list.append(d["meas"])
-    return np.asarray(X), np.asarray(Y), seg_list, green_list, meas_list
+    return np.asarray(X), np.asarray(F), np.asarray(Y), seg_list, green_list, meas_list
 
 
 # --------------------------------------------------------------------------- #
@@ -210,8 +212,9 @@ def main() -> None:
 
     print(f"[1/4] training neural baseline + fitting SCM on {n_tr} nominal episodes ...")
     train_seeds = [base - 1 - i for i in range(n_tr)]
-    X, Y, seg_list, green_list, meas_list = collect_training(cfg, train_seeds)
+    X, F, Y, seg_list, green_list, meas_list = collect_training(cfg, train_seeds)
     neural = UnconstrainedNeuralReconstructor(cfg); neural.fit(X, Y)
+    gnn = GraphNeuralReconstructor(cfg); gnn.fit(F, Y)
     scm = CorridorSCM(cfg); scm.fit(seg_list, green_list, meas_list)
     pm = CTMProcessModel(cfg)
     ekf = ExtendedKalmanReconstructor(cfg)
@@ -241,7 +244,7 @@ def main() -> None:
                     q_rec.append(len(sens_chosen & sens_truth) / len(sens_truth))
             onset_k = int(cfg["attacks"]["onset_s"] / dt_s)
 
-            for rec in (ekf, neural, cons):
+            for rec in (ekf, neural, gnn, cons):
                 rec.reset(rho0)
                 est = np.zeros_like(true)
                 lat = 0.0
